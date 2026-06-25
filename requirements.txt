@@ -1,0 +1,12 @@
+flask
+flask-cors
+requests
+joblib
+numpy
+scipy
+scikit-fuzzy
+pandas
+packaging
+networkx
+setuptools
+wheel
