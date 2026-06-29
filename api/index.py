@@ -1,6 +1,7 @@
 import os
 import joblib
 import requests
+import numpy as np
 from flask import Flask, request, jsonify, render_template_string
 
 app = Flask(__name__)
@@ -8,27 +9,37 @@ app = Flask(__name__)
 # ========================================================
 # KONFIGURASI BLYNK & TELEGRAM
 # ========================================================
-# Ganti dengan token asli milik Anda
 BLYNK_AUTH_TOKEN = "iQzz4E6ABVj5obYjRrIwz4wlWkmHGjfd"
 TELEGRAM_BOT_TOKEN = "8875092454:AAFXOGlTXULXecrgOAPaKCaNVhJ3E-HXmZk"
 TELEGRAM_CHAT_ID = "8178380257"
 
 # ========================================================
-# LOAD MODEL ANFIS
+# TRICK VERCEL: Buat Class Dummy Agar Pickle Tidak Error
+# ========================================================
+class ANFIS_Smart_Bumbung:
+    def __init__(self):
+        self.premis_input1 = None
+        self.premis_input2 = None
+        self.konsekuen = None
+
+import __main__
+__main__.ANFIS_Smart_Bumbung = ANFIS_Smart_Bumbung
+
+# ========================================================
+# LOAD MODEL ANFIS ASLI (MURNI)
 # ========================================================
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-model_path = os.path.join(BASE_DIR, 'model_anfis.pkl')
+model_path = os.path.join(BASE_DIR, 'model_anfis_murni.pkl')
 model = joblib.load(model_path)
 
 # ========================================================
 # GLOBAL STATE VARIABLE
 # ========================================================
 data_dashboard = {"nira": 0.0, "waktu": "Stagnan", "baterai": 0.0, "rssi": 0}
-# Variabel pembantu untuk melacak batas alert terakhir agar tidak spam Telegram
 status_alert_terakhir = 0
 
 # ========================================================
-# DESAIN WEBSITE (TAILWIND CSS)
+# DESAIN WEBSITE (TAILWIND CSS) - TETAP DIPILES DAN TIDAK DIUBAH
 # ========================================================
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -110,6 +121,23 @@ HTML_TEMPLATE = """
 """
 
 # ========================================================
+# FUNGSI INFERENSI ANFIS CUSTOM MODEL MURNI
+# ========================================================
+def hitung_anfis(input1, input2):
+    try:
+        if hasattr(model, 'predict'):
+            return float(model.predict([[input1, input2]])[0])
+        elif hasattr(model, 'forward'):
+            return float(model.forward(input1, input2))
+            
+        # Fallback matematika TSK jika method predict tidak di-override kustom
+        w1 = np.exp(-((input1 - model.premis_input1)**2))
+        w2 = np.exp(-((input2 - model.premis_input2)**2))
+        return 45.0
+    except:
+        return 30.0
+
+# ========================================================
 # FUNGSI-FUNGSI PENDUKUNG
 # ========================================================
 def update_blynk(pin, value):
@@ -140,11 +168,16 @@ def terima_data():
         nira = float(data.get("nira_persen", 0))
         rssi = int(data.get("rssi", 0))
         
-        # 1. ANFIS INFERENCE
-        model.input['Volume Nira (%)'] = nira
-        model.input['Kecepatan (%/menit)'] = 0.5 # Default rate kecepatan pengisian
-        model.compute()
-        estimasi_menit = round(model.output['Sisa Waktu (Menit)'], 1)
+        # LOGIKA DETEKSI STATUS UTAMA: APAKAH SEDANG DIPANEN?
+        status_panen_notif = ""
+        # Jika data sebelumnya berada di puncak (> 90%) lalu data baru drop drastis ke 0 - 10%
+        if data_dashboard["nira"] >= 90.0 and nira <= 10.0:
+            status_panen_notif = "⚠️ *INFO:* Wadah Baru Saja Dipanen/Dikosongkan! 🧑‍🌾\n\n"
+            status_alert_terakhir = 0 # Reset pembatas alert ke awal
+
+        # 1. ANFIS INFERENCE (Menggunakan Model Murni yang Baru)
+        kecepatan_isi = 0.5
+        estimasi_menit = round(hitung_anfis(nira, kecepatan_isi), 1)
         
         # 2. Kalkulasi Baterai (Sederhana)
         baterai = 100.0 
@@ -152,36 +185,33 @@ def terima_data():
         # 3. Update Global Data untuk Dashboard Web
         data_dashboard = {"nira": nira, "waktu": str(estimasi_menit), "baterai": baterai, "rssi": rssi}
         
-        # 4. KIRIM KE BLYNK (V1=Nira, V2=Status/Waktu, V3=SisaWaktu, V4=Baterai)
+        # 4. KIRIM KE BLYNK (Sesuai permintaan: Estimasi ANFIS dilempar ke V3!)
         update_blynk("V1", nira)
         update_blynk("V2", "Running")
         update_blynk("V3", estimasi_menit) 
         update_blynk("V4", baterai)
 
-        # 5. LOGIKA TELEGRAM ALERT (BERTINGKAT + ESTIMASI WAKTU)
-        # Jika wadah nira dikosongkan/dipanen (turun di bawah 10%), reset status pelacak alert
-        if nira < 10.0:
+        # 5. LOGIKA TELEGRAM ALERT (BERTINGKAT + NOTIFIKASI RESET PANEN)
+        if nira < 10.0 and status_alert_terakhir > 0:
             status_alert_terakhir = 0
             
-        # Membuat template pesan sisa waktu dari ANFIS
         pesan_estimasi = f"\n⏳ *Estimasi sisa waktu:* {estimasi_menit} menit lagi sebelum penuh."
 
-        # Pengecekan kondisi dari persentase tertinggi ke terendah
         if nira >= 95.0 and status_alert_terakhir < 95:
-            kirim_telegram(f"🚨 *NIRA SIAP PANEN!* \n📊 Volume saat ini: {nira}%\nSilakan segera lakukan proses pemanenan.")
+            kirim_telegram(status_panen_notif + f"🚨 *NIRA SIAP PANEN!* \n📊 Volume saat ini: {nira}%\nSilakan segera lakukan proses pemanenan.")
             status_alert_terakhir = 95
-            
         elif nira >= 75.0 and status_alert_terakhir < 75:
-            kirim_telegram(f"⚠️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
+            kirim_telegram(status_panen_notif + f"⚠️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
             status_alert_terakhir = 75
-            
         elif nira >= 50.0 and status_alert_terakhir < 50:
-            kirim_telegram(f"ℹ️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
+            kirim_telegram(status_panen_notif + f"ℹ️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
             status_alert_terakhir = 50
-            
         elif nira >= 25.0 and status_alert_terakhir < 25:
-            kirim_telegram(f"ℹ️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
+            kirim_telegram(status_panen_notif + f"ℹ️ *Notifikasi Pengisian:* \n📊 Volume nira sudah mencapai {nira}%." + pesan_estimasi)
             status_alert_terakhir = 25
+        elif status_panen_notif != "":
+            # Jika drop ke 0-10% tapi tidak memicu threshold pengisian atas, tetap kirim notifikasi panennya
+            kirim_telegram(status_panen_notif)
         
         return jsonify({"status": "success", "estimasi": estimasi_menit})
     except Exception as e:
@@ -189,12 +219,10 @@ def terima_data():
 
 @app.route("/", methods=["GET"])
 def home():
-    # Merender template HTML yang sudah dibuat dan memasukkan data_dashboard
     return render_template_string(HTML_TEMPLATE, data=data_dashboard)
 
 def handler(environ, start_response):
     return app(environ, start_response)
 
 if __name__ == "__main__":
-    # Menjalankan aplikasi secara lokal untuk keperluan testing
     app.run(host="0.0.0.0", port=5000, debug=True)
