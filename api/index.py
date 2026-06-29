@@ -218,6 +218,10 @@ def terima_data():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.route('/favicon.png')
+def favicon():
+    return send_file('static/favicon.png', mimetype='image/png')
+
 @app.route("/", methods=["GET"])
 def home():
     return render_template_string(HTML_TEMPLATE, data=data_dashboard)
